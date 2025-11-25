@@ -1,36 +1,7 @@
-//! # Datalog IR
+//! # Datalog IR - Shared Library
 //!
 //! Intermediate Representation types for Datalog query plans.
-//!
-//! This crate provides a canonical IR definition for representing Datalog query
-//! execution plans, suitable for use in query optimizers and execution engines.
-//!
-//! ## Overview
-//!
-//! The main types are:
-//! - [`IRNode`] - Query plan operators (Scan, Map, Filter, Join, Distinct, Union)
-//! - [`Predicate`] - Filter conditions with support for comparisons and logical operators
-//!
-//! ## Example
-//!
-//! ```rust
-//! use datalog_ir::{IRNode, Predicate};
-//!
-//! // Create a scan of the "edge" relation
-//! let scan = IRNode::Scan {
-//!     relation: "edge".to_string(),
-//!     schema: vec!["x".to_string(), "y".to_string()],
-//! };
-//!
-//! // Add a filter: x > 5
-//! let filtered = IRNode::Filter {
-//!     input: Box::new(scan),
-//!     predicate: Predicate::ColumnGtConst(0, 5),
-//! };
-//!
-//! // Get the output schema
-//! assert_eq!(filtered.output_schema(), vec!["x", "y"]);
-//! ```
+//! Used across optimizer modules (M05, M06-M10, M11) for consistency.
 
 use std::collections::HashSet;
 
@@ -38,162 +9,153 @@ use std::collections::HashSet;
 // IR Node Types
 // ============================================================================
 
-/// Represents an operator in the query plan.
+/// Aggregate function types
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AggregateFunction {
+    /// Count distinct values
+    Count,
+    /// Sum of values
+    Sum,
+    /// Minimum value
+    Min,
+    /// Maximum value
+    Max,
+    /// Average value (returns float)
+    Avg,
+}
+
+/// IR Node - represents an operator in the query plan
 ///
-/// `IRNode` is the core building block for constructing Datalog query plans.
-/// Each variant represents a different relational algebra operation.
-///
-/// # Example
-///
-/// ```rust
-/// use datalog_ir::{IRNode, Predicate};
-///
-/// // Build a simple query plan: scan -> filter -> project
-/// let plan = IRNode::Map {
-///     input: Box::new(IRNode::Filter {
-///         input: Box::new(IRNode::Scan {
-///             relation: "users".to_string(),
-///             schema: vec!["id".to_string(), "name".to_string(), "age".to_string()],
-///         }),
-///         predicate: Predicate::ColumnGtConst(2, 18), // age > 18
-///     }),
-///     projection: vec![1], // Keep only "name"
-///     output_schema: vec!["name".to_string()],
-/// };
-///
-/// assert_eq!(plan.output_schema(), vec!["name"]);
-/// ```
+/// This is the canonical IR definition used across all modules.
+/// **IMPORTANT**: M06-M11 MUST use this exact structure!
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IRNode {
-    /// Scan a relation (read from EDB or IDB).
-    ///
-    /// This is typically the leaf node in a query plan, representing
-    /// a base table or derived relation.
+    /// Scan a relation (read from EDB or IDB)
     Scan {
-        /// Name of the relation to scan.
+        /// Name of the relation to scan
         relation: String,
-        /// Column names in the relation's schema.
+        /// Variable names (column names) in the schema
         schema: Vec<String>,
     },
 
-    /// Map (project/transform columns).
-    ///
-    /// Selects a subset of columns from the input and optionally reorders them.
+    /// Map (project/transform columns)
     Map {
-        /// The input node to project from.
+        /// Input node to project from
         input: Box<IRNode>,
-        /// Indices of input columns to keep (in output order).
+        /// Indices of columns to keep from the input
         projection: Vec<usize>,
-        /// Names of columns in the output schema.
+        /// Output column names after projection
         output_schema: Vec<String>,
     },
 
-    /// Filter (select rows matching a predicate).
-    ///
-    /// Passes through only rows where the predicate evaluates to true.
-    /// The schema is unchanged from the input.
+    /// Filter (select rows)
     Filter {
-        /// The input node to filter.
+        /// Input node to filter
         input: Box<IRNode>,
-        /// The condition rows must satisfy.
+        /// Predicate that rows must satisfy
         predicate: Predicate,
     },
 
-    /// Join two inputs on shared keys.
+    /// Join two inputs on shared keys
     ///
-    /// Performs an equi-join on one or more key columns.
-    /// The output schema is the concatenation of left and right schemas.
+    /// **Note**: Uses `Vec<usize>` for multi-column equi-joins
+    /// M06 needs to adapt from single usize to `vec![usize]`
     Join {
-        /// Left input to the join.
+        /// Left input relation
         left: Box<IRNode>,
-        /// Right input to the join.
+        /// Right input relation
         right: Box<IRNode>,
-        /// Column indices from left input to join on.
+        /// Column indices from left to join on (can be multiple)
         left_keys: Vec<usize>,
-        /// Column indices from right input to join on.
+        /// Column indices from right to join on
         right_keys: Vec<usize>,
-        /// Names of columns in the joined output.
+        /// Output column names after join
         output_schema: Vec<String>,
     },
 
-    /// Distinct (remove duplicate rows).
-    ///
-    /// Returns only unique rows from the input.
+    /// Distinct (remove duplicates)
     Distinct {
-        /// The input node to deduplicate.
+        /// Input node to deduplicate
         input: Box<IRNode>,
     },
 
-    /// Union (combine multiple inputs).
-    ///
-    /// Concatenates rows from all inputs. All inputs must have the same schema.
+    /// Union (combine multiple inputs)
     Union {
-        /// The input nodes to combine.
+        /// Input nodes to combine (must have same schema)
         inputs: Vec<IRNode>,
+    },
+
+    /// Aggregate operation (GROUP BY with aggregation functions)
+    ///
+    /// Example: `result(x, count<y>) :- data(x, y).` groups by x and counts y values
+    Aggregate {
+        /// Input node to aggregate
+        input: Box<IRNode>,
+        /// Columns to group by (indices into input schema)
+        group_by: Vec<usize>,
+        /// Aggregations to compute: (function, input column index)
+        aggregations: Vec<(AggregateFunction, usize)>,
+        /// Output schema: group by columns first, then aggregate result columns
+        output_schema: Vec<String>,
+    },
+
+    /// Antijoin (negation): Left - (Left ⋈ Right)
+    ///
+    /// Returns tuples from left that do NOT have a match in right.
+    /// Used for stratified negation in Datalog:
+    /// `unreachable(x) :- node(x), !reach(x).`
+    ///
+    /// ## Semantics
+    /// - For each tuple in left, check if there exists a matching tuple in right
+    /// - If no match exists, include the left tuple in the output
+    /// - Output schema is the same as left's schema
+    ///
+    /// ## Example
+    /// ```text
+    /// left:  [(1, "a"), (2, "b"), (3, "c")]
+    /// right: [(1, _), (3, _)]  // right tuples with key 1 and 3
+    /// result: [(2, "b")]       // only (2, "b") has no match
+    /// ```
+    Antijoin {
+        /// The relation to keep tuples from (the "positive" relation)
+        left: Box<IRNode>,
+        /// The relation to check against (the "negated" relation)
+        right: Box<IRNode>,
+        /// Columns from left to use as join key
+        left_keys: Vec<usize>,
+        /// Columns from right to use as join key
+        right_keys: Vec<usize>,
+        /// Output schema (same as left's schema)
+        output_schema: Vec<String>,
     },
 }
 
 impl IRNode {
-    /// Returns the output schema of this node.
+    /// Get the output schema of this node
     ///
-    /// The schema represents the column names that will be present in the
-    /// output of this operator. For `Filter` and `Distinct`, the schema
-    /// passes through unchanged from the input.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use datalog_ir::IRNode;
-    ///
-    /// let scan = IRNode::Scan {
-    ///     relation: "edge".to_string(),
-    ///     schema: vec!["x".to_string(), "y".to_string()],
-    /// };
-    /// assert_eq!(scan.output_schema(), vec!["x", "y"]);
-    /// ```
+    /// **Important for M06**: Filter doesn't store schema separately!
+    /// Schema is computed from the input.
     pub fn output_schema(&self) -> Vec<String> {
         match self {
             IRNode::Scan { schema, .. } => schema.clone(),
             IRNode::Map { output_schema, .. } => output_schema.clone(),
-            IRNode::Filter { input, .. } => input.output_schema(),
+            IRNode::Filter { input, .. } => input.output_schema(), // Pass through!
             IRNode::Join { output_schema, .. } => output_schema.clone(),
             IRNode::Distinct { input } => input.output_schema(),
             IRNode::Union { inputs } => {
+                // All inputs must have same schema
                 if inputs.is_empty() {
                     vec![]
                 } else {
                     inputs[0].output_schema()
                 }
             }
+            IRNode::Aggregate { output_schema, .. } => output_schema.clone(),
+            IRNode::Antijoin { output_schema, .. } => output_schema.clone(),
         }
     }
 
-    /// Pretty prints the IR tree for debugging.
-    ///
-    /// Returns a formatted string representation of the query plan tree,
-    /// with each level indented by the specified amount.
-    ///
-    /// # Arguments
-    ///
-    /// * `indent` - The base indentation level (number of 2-space units).
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use datalog_ir::{IRNode, Predicate};
-    ///
-    /// let plan = IRNode::Filter {
-    ///     input: Box::new(IRNode::Scan {
-    ///         relation: "edge".to_string(),
-    ///         schema: vec!["x".to_string(), "y".to_string()],
-    ///     }),
-    ///     predicate: Predicate::ColumnGtConst(0, 5),
-    /// };
-    ///
-    /// let output = plan.pretty_print(0);
-    /// assert!(output.contains("Filter"));
-    /// assert!(output.contains("Scan"));
-    /// ```
+    /// Pretty print the IR tree for debugging
     pub fn pretty_print(&self, indent: usize) -> String {
         let prefix = "  ".repeat(indent);
 
@@ -250,17 +212,51 @@ impl IRNode {
                 }
                 result
             }
+            IRNode::Aggregate {
+                input,
+                group_by,
+                aggregations,
+                output_schema,
+            } => {
+                let agg_strs: Vec<String> = aggregations
+                    .iter()
+                    .map(|(func, col)| format!("{:?}({})", func, col))
+                    .collect();
+                format!(
+                    "{}Aggregate(group_by={:?}, aggs=[{}], output={:?})\n{}",
+                    prefix,
+                    group_by,
+                    agg_strs.join(", "),
+                    output_schema,
+                    input.pretty_print(indent + 1)
+                )
+            }
+            IRNode::Antijoin {
+                left,
+                right,
+                left_keys,
+                right_keys,
+                output_schema,
+            } => {
+                format!(
+                    "{}Antijoin(left_keys={:?}, right_keys={:?}, output={:?})\n{}\n{}",
+                    prefix,
+                    left_keys,
+                    right_keys,
+                    output_schema,
+                    left.pretty_print(indent + 1),
+                    right.pretty_print(indent + 1)
+                )
+            }
         }
     }
 
-    /// Returns `true` if this node is a [`Scan`](IRNode::Scan).
-    #[inline]
+    /// Check if this node is a scan
     pub fn is_scan(&self) -> bool {
         matches!(self, IRNode::Scan { .. })
     }
 
-    /// Returns `true` if this node is a [`Join`](IRNode::Join).
-    #[inline]
+    /// Check if this node is a join
     pub fn is_join(&self) -> bool {
         matches!(self, IRNode::Join { .. })
     }
@@ -270,81 +266,37 @@ impl IRNode {
 // Predicate Types
 // ============================================================================
 
-/// Predicate for filtering rows in [`IRNode::Filter`].
-///
-/// Predicates can express column comparisons with constants, column-to-column
-/// comparisons, and logical combinations using `And` and `Or`.
-///
-/// # Example
-///
-/// ```rust
-/// use datalog_ir::Predicate;
-///
-/// // Simple comparison: column 0 > 10
-/// let pred = Predicate::ColumnGtConst(0, 10);
-///
-/// // Compound predicate: (col0 > 10) AND (col1 = col2)
-/// let compound = Predicate::And(
-///     Box::new(Predicate::ColumnGtConst(0, 10)),
-///     Box::new(Predicate::ColumnsEq(1, 2)),
-/// );
-///
-/// // Find which columns are referenced
-/// let cols = compound.referenced_columns();
-/// assert!(cols.contains(&0));
-/// assert!(cols.contains(&1));
-/// assert!(cols.contains(&2));
-/// ```
+/// Predicate for Filter nodes
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Predicate {
-    /// Column equals constant: `column[idx] == value`.
+    /// Column equals constant
     ColumnEqConst(usize, i64),
-    /// Column not equals constant: `column[idx] != value`.
+    /// Column not equals constant
     ColumnNeConst(usize, i64),
-    /// Column greater than constant: `column[idx] > value`.
+    /// Column greater than constant
     ColumnGtConst(usize, i64),
-    /// Column less than constant: `column[idx] < value`.
+    /// Column less than constant
     ColumnLtConst(usize, i64),
-    /// Column greater or equal to constant: `column[idx] >= value`.
+    /// Column greater or equal to constant
     ColumnGeConst(usize, i64),
-    /// Column less or equal to constant: `column[idx] <= value`.
+    /// Column less or equal to constant
     ColumnLeConst(usize, i64),
-    /// Two columns are equal: `column[left] == column[right]`.
+    /// Two columns are equal
     ColumnsEq(usize, usize),
-    /// Two columns are not equal: `column[left] != column[right]`.
+    /// Two columns are not equal
     ColumnsNe(usize, usize),
-    /// Logical AND of two predicates.
+    /// Logical AND
     And(Box<Predicate>, Box<Predicate>),
-    /// Logical OR of two predicates.
+    /// Logical OR
     Or(Box<Predicate>, Box<Predicate>),
-    /// Always true (useful for optimization passes).
+    /// Always true (for optimization)
     True,
-    /// Always false (useful for optimization passes).
+    /// Always false (for optimization)
     False,
 }
 
 impl Predicate {
-    /// Returns all column indices referenced by this predicate.
-    ///
-    /// This is useful for determining which columns a filter depends on,
-    /// which can inform optimizations like filter pushdown.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use datalog_ir::Predicate;
-    ///
-    /// let pred = Predicate::And(
-    ///     Box::new(Predicate::ColumnGtConst(0, 5)),
-    ///     Box::new(Predicate::ColumnsEq(1, 2)),
-    /// );
-    ///
-    /// let cols = pred.referenced_columns();
-    /// assert_eq!(cols.len(), 3);
-    /// assert!(cols.contains(&0));
-    /// assert!(cols.contains(&1));
-    /// assert!(cols.contains(&2));
-    /// ```
+    /// Get all columns referenced by this predicate
     pub fn referenced_columns(&self) -> HashSet<usize> {
         let mut cols = HashSet::new();
         self.collect_columns(&mut cols);
@@ -373,41 +325,17 @@ impl Predicate {
         }
     }
 
-    /// Returns `true` if this predicate is [`Predicate::True`].
-    #[inline]
+    /// Check if predicate is always true
     pub fn is_always_true(&self) -> bool {
         matches!(self, Predicate::True)
     }
 
-    /// Returns `true` if this predicate is [`Predicate::False`].
-    #[inline]
+    /// Check if predicate is always false
     pub fn is_always_false(&self) -> bool {
         matches!(self, Predicate::False)
     }
 
-    /// Simplifies the predicate using basic constant folding.
-    ///
-    /// Performs the following simplifications:
-    /// - `True AND x` → `x`
-    /// - `x AND True` → `x`
-    /// - `False AND x` → `False`
-    /// - `True OR x` → `True`
-    /// - `False OR x` → `x`
-    /// - `x OR False` → `x`
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use datalog_ir::Predicate;
-    ///
-    /// let pred = Predicate::And(
-    ///     Box::new(Predicate::True),
-    ///     Box::new(Predicate::ColumnGtConst(0, 5)),
-    /// );
-    ///
-    /// let simplified = pred.simplify();
-    /// assert_eq!(simplified, Predicate::ColumnGtConst(0, 5));
-    /// ```
+    /// Simplify predicate (basic constant folding)
     pub fn simplify(self) -> Self {
         match self {
             Predicate::And(p1, p2) => {
@@ -442,33 +370,10 @@ impl Predicate {
         }
     }
 
-    /// Adjusts column indices after a projection.
+    /// Adjust column indices after projection
+    /// Returns None if predicate references columns not in projection
     ///
-    /// When pushing a filter through a `Map` node, the column indices in the
-    /// predicate need to be remapped to match the new schema.
-    ///
-    /// Returns `None` if the predicate references columns that are not present
-    /// in the projection.
-    ///
-    /// # Arguments
-    ///
-    /// * `projection` - The projection mapping: `projection[new_idx] = old_idx`.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use datalog_ir::Predicate;
-    ///
-    /// // Original predicate on column 1
-    /// let pred = Predicate::ColumnGtConst(1, 5);
-    ///
-    /// // Projection: [1, 0, 2] means new column 0 = old column 1
-    /// let projection = vec![1, 0, 2];
-    ///
-    /// let adjusted = pred.adjust_for_projection(&projection);
-    /// // Column 1 is now at position 0
-    /// assert_eq!(adjusted, Some(Predicate::ColumnGtConst(0, 5)));
-    /// ```
+    /// **For M06 filter pushdown**: Use this when pushing filters through maps
     pub fn adjust_for_projection(&self, projection: &[usize]) -> Option<Self> {
         // Helper: find new index of old column
         let find_new_index =
@@ -523,6 +428,7 @@ impl Predicate {
                 }
             }
             Predicate::Or(p1, p2) => {
+                // For OR, we need BOTH predicates to be adjustable
                 match (
                     p1.adjust_for_projection(projection),
                     p2.adjust_for_projection(projection),
@@ -530,7 +436,7 @@ impl Predicate {
                     (Some(new_p1), Some(new_p2)) => {
                         Some(Predicate::Or(Box::new(new_p1), Box::new(new_p2)))
                     }
-                    _ => None,
+                    _ => None, // Can't push OR if either side doesn't have all columns
                 }
             }
             Predicate::True => Some(Predicate::True),
@@ -548,7 +454,47 @@ mod tests {
     use super::*;
 
     // ========================================================================
-    // IRNode Tests
+    // AggregateFunction Tests
+    // ========================================================================
+
+    #[test]
+    fn test_aggregate_function_clone_eq() {
+        let funcs = vec![
+            AggregateFunction::Count,
+            AggregateFunction::Sum,
+            AggregateFunction::Min,
+            AggregateFunction::Max,
+            AggregateFunction::Avg,
+        ];
+
+        for func in &funcs {
+            let cloned = func.clone();
+            assert_eq!(func, &cloned);
+        }
+    }
+
+    #[test]
+    fn test_aggregate_function_debug() {
+        assert_eq!(format!("{:?}", AggregateFunction::Count), "Count");
+        assert_eq!(format!("{:?}", AggregateFunction::Sum), "Sum");
+        assert_eq!(format!("{:?}", AggregateFunction::Min), "Min");
+        assert_eq!(format!("{:?}", AggregateFunction::Max), "Max");
+        assert_eq!(format!("{:?}", AggregateFunction::Avg), "Avg");
+    }
+
+    #[test]
+    fn test_aggregate_function_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(AggregateFunction::Count);
+        set.insert(AggregateFunction::Sum);
+        set.insert(AggregateFunction::Count); // Duplicate
+
+        assert_eq!(set.len(), 2);
+    }
+
+    // ========================================================================
+    // IRNode::Scan Tests
     // ========================================================================
 
     #[test]
@@ -563,6 +509,30 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_empty_schema() {
+        let scan = IRNode::Scan {
+            relation: "empty".to_string(),
+            schema: vec![],
+        };
+        assert_eq!(scan.output_schema(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_scan_pretty_print() {
+        let scan = IRNode::Scan {
+            relation: "users".to_string(),
+            schema: vec!["id".to_string(), "name".to_string()],
+        };
+        let output = scan.pretty_print(0);
+        assert!(output.contains("Scan(users)"));
+        assert!(output.contains("schema="));
+    }
+
+    // ========================================================================
+    // IRNode::Filter Tests
+    // ========================================================================
+
+    #[test]
     fn test_filter_passes_through_schema() {
         let scan = IRNode::Scan {
             relation: "edge".to_string(),
@@ -575,7 +545,28 @@ mod tests {
         };
 
         assert_eq!(filter.output_schema(), vec!["x", "y"]);
+        assert!(!filter.is_scan());
+        assert!(!filter.is_join());
     }
+
+    #[test]
+    fn test_filter_pretty_print() {
+        let scan = IRNode::Scan {
+            relation: "data".to_string(),
+            schema: vec!["x".to_string()],
+        };
+        let filter = IRNode::Filter {
+            input: Box::new(scan),
+            predicate: Predicate::ColumnGtConst(0, 10),
+        };
+        let output = filter.pretty_print(0);
+        assert!(output.contains("Filter"));
+        assert!(output.contains("Scan"));
+    }
+
+    // ========================================================================
+    // IRNode::Map Tests
+    // ========================================================================
 
     #[test]
     fn test_map_reorders_schema() {
@@ -592,6 +583,43 @@ mod tests {
 
         assert_eq!(map.output_schema(), vec!["y", "x"]);
     }
+
+    #[test]
+    fn test_map_projection_subset() {
+        let scan = IRNode::Scan {
+            relation: "data".to_string(),
+            schema: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        };
+
+        let map = IRNode::Map {
+            input: Box::new(scan),
+            projection: vec![0, 2],
+            output_schema: vec!["a".to_string(), "c".to_string()],
+        };
+
+        assert_eq!(map.output_schema(), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn test_map_pretty_print() {
+        let scan = IRNode::Scan {
+            relation: "data".to_string(),
+            schema: vec!["x".to_string(), "y".to_string()],
+        };
+        let map = IRNode::Map {
+            input: Box::new(scan),
+            projection: vec![1],
+            output_schema: vec!["y".to_string()],
+        };
+        let output = map.pretty_print(0);
+        assert!(output.contains("Map"));
+        assert!(output.contains("projection="));
+        assert!(output.contains("output="));
+    }
+
+    // ========================================================================
+    // IRNode::Join Tests
+    // ========================================================================
 
     #[test]
     fn test_join_output_schema() {
@@ -624,6 +652,72 @@ mod tests {
     }
 
     #[test]
+    fn test_join_multi_key() {
+        let left = IRNode::Scan {
+            relation: "orders".to_string(),
+            schema: vec![
+                "order_id".to_string(),
+                "customer_id".to_string(),
+                "product_id".to_string(),
+            ],
+        };
+
+        let right = IRNode::Scan {
+            relation: "order_details".to_string(),
+            schema: vec![
+                "detail_order_id".to_string(),
+                "detail_product_id".to_string(),
+                "quantity".to_string(),
+            ],
+        };
+
+        let join = IRNode::Join {
+            left: Box::new(left),
+            right: Box::new(right),
+            left_keys: vec![0, 2],
+            right_keys: vec![0, 1],
+            output_schema: vec![
+                "order_id".to_string(),
+                "customer_id".to_string(),
+                "product_id".to_string(),
+                "detail_order_id".to_string(),
+                "detail_product_id".to_string(),
+                "quantity".to_string(),
+            ],
+        };
+
+        assert_eq!(join.output_schema().len(), 6);
+        assert!(join.is_join());
+    }
+
+    #[test]
+    fn test_join_pretty_print() {
+        let left = IRNode::Scan {
+            relation: "a".to_string(),
+            schema: vec!["x".to_string()],
+        };
+        let right = IRNode::Scan {
+            relation: "b".to_string(),
+            schema: vec!["y".to_string()],
+        };
+        let join = IRNode::Join {
+            left: Box::new(left),
+            right: Box::new(right),
+            left_keys: vec![0],
+            right_keys: vec![0],
+            output_schema: vec!["x".to_string(), "y".to_string()],
+        };
+        let output = join.pretty_print(0);
+        assert!(output.contains("Join"));
+        assert!(output.contains("left_keys="));
+        assert!(output.contains("right_keys="));
+    }
+
+    // ========================================================================
+    // IRNode::Distinct Tests
+    // ========================================================================
+
+    #[test]
     fn test_distinct_passes_through_schema() {
         let scan = IRNode::Scan {
             relation: "edge".to_string(),
@@ -636,6 +730,24 @@ mod tests {
 
         assert_eq!(distinct.output_schema(), vec!["x", "y"]);
     }
+
+    #[test]
+    fn test_distinct_pretty_print() {
+        let scan = IRNode::Scan {
+            relation: "data".to_string(),
+            schema: vec!["x".to_string()],
+        };
+        let distinct = IRNode::Distinct {
+            input: Box::new(scan),
+        };
+        let output = distinct.pretty_print(0);
+        assert!(output.contains("Distinct"));
+        assert!(output.contains("Scan"));
+    }
+
+    // ========================================================================
+    // IRNode::Union Tests
+    // ========================================================================
 
     #[test]
     fn test_union_uses_first_input_schema() {
@@ -663,19 +775,343 @@ mod tests {
     }
 
     #[test]
-    fn test_pretty_print_contains_operators() {
-        let plan = IRNode::Filter {
-            input: Box::new(IRNode::Scan {
-                relation: "edge".to_string(),
-                schema: vec!["x".to_string(), "y".to_string()],
-            }),
-            predicate: Predicate::ColumnGtConst(0, 5),
+    fn test_union_single_input() {
+        let scan = IRNode::Scan {
+            relation: "data".to_string(),
+            schema: vec!["x".to_string()],
+        };
+        let union = IRNode::Union { inputs: vec![scan] };
+        assert_eq!(union.output_schema(), vec!["x"]);
+    }
+
+    #[test]
+    fn test_union_pretty_print() {
+        let scan1 = IRNode::Scan {
+            relation: "a".to_string(),
+            schema: vec!["x".to_string()],
+        };
+        let scan2 = IRNode::Scan {
+            relation: "b".to_string(),
+            schema: vec!["x".to_string()],
+        };
+        let union = IRNode::Union {
+            inputs: vec![scan1, scan2],
+        };
+        let output = union.pretty_print(0);
+        assert!(output.contains("Union"));
+    }
+
+    // ========================================================================
+    // IRNode::Aggregate Tests
+    // ========================================================================
+
+    #[test]
+    fn test_aggregate_output_schema() {
+        let scan = IRNode::Scan {
+            relation: "sales".to_string(),
+            schema: vec![
+                "product".to_string(),
+                "region".to_string(),
+                "amount".to_string(),
+            ],
         };
 
-        let output = plan.pretty_print(0);
-        assert!(output.contains("Filter"));
-        assert!(output.contains("Scan"));
-        assert!(output.contains("edge"));
+        let aggregate = IRNode::Aggregate {
+            input: Box::new(scan),
+            group_by: vec![0, 1],
+            aggregations: vec![(AggregateFunction::Sum, 2), (AggregateFunction::Count, 2)],
+            output_schema: vec![
+                "product".to_string(),
+                "region".to_string(),
+                "total_amount".to_string(),
+                "count".to_string(),
+            ],
+        };
+
+        assert_eq!(
+            aggregate.output_schema(),
+            vec!["product", "region", "total_amount", "count"]
+        );
+    }
+
+    #[test]
+    fn test_aggregate_no_group_by() {
+        let scan = IRNode::Scan {
+            relation: "data".to_string(),
+            schema: vec!["value".to_string()],
+        };
+
+        let aggregate = IRNode::Aggregate {
+            input: Box::new(scan),
+            group_by: vec![],
+            aggregations: vec![
+                (AggregateFunction::Sum, 0),
+                (AggregateFunction::Avg, 0),
+                (AggregateFunction::Min, 0),
+                (AggregateFunction::Max, 0),
+            ],
+            output_schema: vec![
+                "sum".to_string(),
+                "avg".to_string(),
+                "min".to_string(),
+                "max".to_string(),
+            ],
+        };
+
+        assert_eq!(aggregate.output_schema().len(), 4);
+    }
+
+    #[test]
+    fn test_aggregate_single_aggregation() {
+        let scan = IRNode::Scan {
+            relation: "users".to_string(),
+            schema: vec!["id".to_string(), "name".to_string()],
+        };
+
+        let aggregate = IRNode::Aggregate {
+            input: Box::new(scan),
+            group_by: vec![],
+            aggregations: vec![(AggregateFunction::Count, 0)],
+            output_schema: vec!["user_count".to_string()],
+        };
+
+        assert_eq!(aggregate.output_schema(), vec!["user_count"]);
+    }
+
+    #[test]
+    fn test_aggregate_pretty_print() {
+        let scan = IRNode::Scan {
+            relation: "data".to_string(),
+            schema: vec!["x".to_string(), "y".to_string()],
+        };
+        let aggregate = IRNode::Aggregate {
+            input: Box::new(scan),
+            group_by: vec![0],
+            aggregations: vec![(AggregateFunction::Sum, 1)],
+            output_schema: vec!["x".to_string(), "sum_y".to_string()],
+        };
+        let output = aggregate.pretty_print(0);
+        assert!(output.contains("Aggregate"));
+        assert!(output.contains("group_by="));
+        assert!(output.contains("Sum(1)"));
+    }
+
+    #[test]
+    fn test_aggregate_multiple_functions_pretty_print() {
+        let scan = IRNode::Scan {
+            relation: "data".to_string(),
+            schema: vec!["x".to_string(), "y".to_string()],
+        };
+        let aggregate = IRNode::Aggregate {
+            input: Box::new(scan),
+            group_by: vec![0],
+            aggregations: vec![
+                (AggregateFunction::Count, 1),
+                (AggregateFunction::Max, 1),
+                (AggregateFunction::Min, 1),
+            ],
+            output_schema: vec![
+                "x".to_string(),
+                "cnt".to_string(),
+                "max".to_string(),
+                "min".to_string(),
+            ],
+        };
+        let output = aggregate.pretty_print(0);
+        assert!(output.contains("Count(1)"));
+        assert!(output.contains("Max(1)"));
+        assert!(output.contains("Min(1)"));
+    }
+
+    // ========================================================================
+    // IRNode::Antijoin Tests
+    // ========================================================================
+
+    #[test]
+    fn test_antijoin_output_schema() {
+        let nodes = IRNode::Scan {
+            relation: "node".to_string(),
+            schema: vec!["id".to_string(), "label".to_string()],
+        };
+
+        let reachable = IRNode::Scan {
+            relation: "reachable".to_string(),
+            schema: vec!["node_id".to_string()],
+        };
+
+        let antijoin = IRNode::Antijoin {
+            left: Box::new(nodes),
+            right: Box::new(reachable),
+            left_keys: vec![0],
+            right_keys: vec![0],
+            output_schema: vec!["id".to_string(), "label".to_string()],
+        };
+
+        assert_eq!(antijoin.output_schema(), vec!["id", "label"]);
+    }
+
+    #[test]
+    fn test_antijoin_multi_key() {
+        let left = IRNode::Scan {
+            relation: "all_pairs".to_string(),
+            schema: vec!["x".to_string(), "y".to_string(), "data".to_string()],
+        };
+
+        let right = IRNode::Scan {
+            relation: "excluded_pairs".to_string(),
+            schema: vec!["a".to_string(), "b".to_string()],
+        };
+
+        let antijoin = IRNode::Antijoin {
+            left: Box::new(left),
+            right: Box::new(right),
+            left_keys: vec![0, 1],
+            right_keys: vec![0, 1],
+            output_schema: vec!["x".to_string(), "y".to_string(), "data".to_string()],
+        };
+
+        assert_eq!(antijoin.output_schema(), vec!["x", "y", "data"]);
+    }
+
+    #[test]
+    fn test_antijoin_pretty_print() {
+        let left = IRNode::Scan {
+            relation: "all_nodes".to_string(),
+            schema: vec!["id".to_string()],
+        };
+        let right = IRNode::Scan {
+            relation: "visited".to_string(),
+            schema: vec!["node_id".to_string()],
+        };
+        let antijoin = IRNode::Antijoin {
+            left: Box::new(left),
+            right: Box::new(right),
+            left_keys: vec![0],
+            right_keys: vec![0],
+            output_schema: vec!["id".to_string()],
+        };
+        let output = antijoin.pretty_print(0);
+        assert!(output.contains("Antijoin"));
+        assert!(output.contains("left_keys="));
+        assert!(output.contains("right_keys="));
+        assert!(output.contains("all_nodes"));
+        assert!(output.contains("visited"));
+    }
+
+    #[test]
+    fn test_antijoin_is_not_join() {
+        let left = IRNode::Scan {
+            relation: "a".to_string(),
+            schema: vec!["x".to_string()],
+        };
+        let right = IRNode::Scan {
+            relation: "b".to_string(),
+            schema: vec!["y".to_string()],
+        };
+        let antijoin = IRNode::Antijoin {
+            left: Box::new(left),
+            right: Box::new(right),
+            left_keys: vec![0],
+            right_keys: vec![0],
+            output_schema: vec!["x".to_string()],
+        };
+        assert!(!antijoin.is_join());
+        assert!(!antijoin.is_scan());
+    }
+
+    // ========================================================================
+    // IRNode Clone and Eq Tests
+    // ========================================================================
+
+    #[test]
+    fn test_irnode_clone_and_eq() {
+        let scan = IRNode::Scan {
+            relation: "test".to_string(),
+            schema: vec!["a".to_string()],
+        };
+
+        let scan_clone = scan.clone();
+        assert_eq!(scan, scan_clone);
+    }
+
+    #[test]
+    fn test_irnode_hash() {
+        use std::collections::HashSet;
+        let scan1 = IRNode::Scan {
+            relation: "test".to_string(),
+            schema: vec!["a".to_string()],
+        };
+        let scan2 = IRNode::Scan {
+            relation: "test".to_string(),
+            schema: vec!["a".to_string()],
+        };
+        let scan3 = IRNode::Scan {
+            relation: "other".to_string(),
+            schema: vec!["a".to_string()],
+        };
+
+        let mut set = HashSet::new();
+        set.insert(scan1);
+        set.insert(scan2);
+        set.insert(scan3);
+
+        assert_eq!(set.len(), 2);
+    }
+
+    // ========================================================================
+    // Nested IRNode Tests
+    // ========================================================================
+
+    #[test]
+    fn test_nested_operations() {
+        let scan = IRNode::Scan {
+            relation: "data".to_string(),
+            schema: vec!["x".to_string(), "y".to_string(), "z".to_string()],
+        };
+
+        let filter = IRNode::Filter {
+            input: Box::new(scan),
+            predicate: Predicate::ColumnGtConst(0, 10),
+        };
+
+        let map = IRNode::Map {
+            input: Box::new(filter),
+            projection: vec![0, 2],
+            output_schema: vec!["x".to_string(), "z".to_string()],
+        };
+
+        let distinct = IRNode::Distinct {
+            input: Box::new(map),
+        };
+
+        assert_eq!(distinct.output_schema(), vec!["x", "z"]);
+    }
+
+    #[test]
+    fn test_complex_query_plan() {
+        // SELECT DISTINCT x, SUM(y) FROM data WHERE z > 5 GROUP BY x
+        let scan = IRNode::Scan {
+            relation: "data".to_string(),
+            schema: vec!["x".to_string(), "y".to_string(), "z".to_string()],
+        };
+
+        let filter = IRNode::Filter {
+            input: Box::new(scan),
+            predicate: Predicate::ColumnGtConst(2, 5),
+        };
+
+        let aggregate = IRNode::Aggregate {
+            input: Box::new(filter),
+            group_by: vec![0],
+            aggregations: vec![(AggregateFunction::Sum, 1)],
+            output_schema: vec!["x".to_string(), "sum_y".to_string()],
+        };
+
+        let distinct = IRNode::Distinct {
+            input: Box::new(aggregate),
+        };
+
+        assert_eq!(distinct.output_schema(), vec!["x", "sum_y"]);
     }
 
     // ========================================================================
@@ -722,6 +1158,24 @@ mod tests {
     fn test_predicate_referenced_columns_true_false() {
         assert!(Predicate::True.referenced_columns().is_empty());
         assert!(Predicate::False.referenced_columns().is_empty());
+    }
+
+    #[test]
+    fn test_predicate_referenced_columns_all_types() {
+        let predicates = vec![
+            Predicate::ColumnEqConst(0, 1),
+            Predicate::ColumnNeConst(1, 2),
+            Predicate::ColumnGtConst(2, 3),
+            Predicate::ColumnLtConst(3, 4),
+            Predicate::ColumnGeConst(4, 5),
+            Predicate::ColumnLeConst(5, 6),
+        ];
+
+        for (i, pred) in predicates.iter().enumerate() {
+            let cols = pred.referenced_columns();
+            assert_eq!(cols.len(), 1);
+            assert!(cols.contains(&i));
+        }
     }
 
     #[test]
@@ -773,6 +1227,12 @@ mod tests {
             Box::new(Predicate::ColumnGtConst(0, 5)),
         );
         assert_eq!(pred.simplify(), Predicate::True);
+
+        let pred2 = Predicate::Or(
+            Box::new(Predicate::ColumnGtConst(0, 5)),
+            Box::new(Predicate::True),
+        );
+        assert_eq!(pred2.simplify(), Predicate::True);
     }
 
     #[test]
@@ -803,6 +1263,16 @@ mod tests {
     }
 
     #[test]
+    fn test_predicate_simplify_no_change() {
+        let pred = Predicate::And(
+            Box::new(Predicate::ColumnGtConst(0, 5)),
+            Box::new(Predicate::ColumnLtConst(0, 10)),
+        );
+        let simplified = pred.clone().simplify();
+        assert_eq!(simplified, pred);
+    }
+
+    #[test]
     fn test_predicate_adjust_for_projection_simple() {
         let projection = vec![1, 0, 2];
         let pred = Predicate::ColumnGtConst(1, 5);
@@ -827,6 +1297,15 @@ mod tests {
 
         let adjusted = pred.adjust_for_projection(&projection);
         assert_eq!(adjusted, Some(Predicate::ColumnsEq(1, 2)));
+    }
+
+    #[test]
+    fn test_predicate_adjust_for_projection_columns_ne() {
+        let projection = vec![2, 0, 1];
+        let pred = Predicate::ColumnsNe(0, 1);
+
+        let adjusted = pred.adjust_for_projection(&projection);
+        assert_eq!(adjusted, Some(Predicate::ColumnsNe(1, 2)));
     }
 
     #[test]
@@ -860,6 +1339,18 @@ mod tests {
     }
 
     #[test]
+    fn test_predicate_adjust_for_projection_and_both_missing() {
+        let projection = vec![2];
+        let pred = Predicate::And(
+            Box::new(Predicate::ColumnEqConst(0, 5)),
+            Box::new(Predicate::ColumnGtConst(1, 10)),
+        );
+
+        let adjusted = pred.adjust_for_projection(&projection);
+        assert_eq!(adjusted, None);
+    }
+
+    #[test]
     fn test_predicate_adjust_for_projection_or_requires_both() {
         let projection = vec![0];
         let pred = Predicate::Or(
@@ -869,6 +1360,24 @@ mod tests {
 
         let adjusted = pred.adjust_for_projection(&projection);
         assert_eq!(adjusted, None);
+    }
+
+    #[test]
+    fn test_predicate_adjust_for_projection_or_both_present() {
+        let projection = vec![1, 0];
+        let pred = Predicate::Or(
+            Box::new(Predicate::ColumnEqConst(0, 5)),
+            Box::new(Predicate::ColumnGtConst(1, 10)),
+        );
+
+        let adjusted = pred.adjust_for_projection(&projection);
+        assert_eq!(
+            adjusted,
+            Some(Predicate::Or(
+                Box::new(Predicate::ColumnEqConst(1, 5)),
+                Box::new(Predicate::ColumnGtConst(0, 10)),
+            ))
+        );
     }
 
     #[test]
@@ -885,30 +1394,40 @@ mod tests {
     }
 
     #[test]
-    fn test_predicate_all_comparison_types() {
-        let pred_eq = Predicate::ColumnEqConst(0, 1);
-        let pred_ne = Predicate::ColumnNeConst(0, 1);
-        let pred_gt = Predicate::ColumnGtConst(0, 1);
-        let pred_lt = Predicate::ColumnLtConst(0, 1);
-        let pred_ge = Predicate::ColumnGeConst(0, 1);
-        let pred_le = Predicate::ColumnLeConst(0, 1);
+    fn test_predicate_adjust_all_comparison_types() {
+        let projection = vec![1, 0];
 
-        for pred in [pred_eq, pred_ne, pred_gt, pred_lt, pred_ge, pred_le] {
-            let cols = pred.referenced_columns();
-            assert_eq!(cols.len(), 1);
-            assert!(cols.contains(&0));
+        let predicates = vec![
+            (
+                Predicate::ColumnEqConst(0, 1),
+                Predicate::ColumnEqConst(1, 1),
+            ),
+            (
+                Predicate::ColumnNeConst(0, 1),
+                Predicate::ColumnNeConst(1, 1),
+            ),
+            (
+                Predicate::ColumnGtConst(0, 1),
+                Predicate::ColumnGtConst(1, 1),
+            ),
+            (
+                Predicate::ColumnLtConst(0, 1),
+                Predicate::ColumnLtConst(1, 1),
+            ),
+            (
+                Predicate::ColumnGeConst(0, 1),
+                Predicate::ColumnGeConst(1, 1),
+            ),
+            (
+                Predicate::ColumnLeConst(0, 1),
+                Predicate::ColumnLeConst(1, 1),
+            ),
+        ];
+
+        for (input, expected) in predicates {
+            let adjusted = input.adjust_for_projection(&projection);
+            assert_eq!(adjusted, Some(expected));
         }
-    }
-
-    #[test]
-    fn test_irnode_clone_and_eq() {
-        let scan = IRNode::Scan {
-            relation: "test".to_string(),
-            schema: vec!["a".to_string()],
-        };
-
-        let scan_clone = scan.clone();
-        assert_eq!(scan, scan_clone);
     }
 
     #[test]
@@ -920,5 +1439,128 @@ mod tests {
 
         let pred_clone = pred.clone();
         assert_eq!(pred, pred_clone);
+    }
+
+    #[test]
+    fn test_predicate_hash() {
+        use std::collections::HashSet;
+        let pred1 = Predicate::ColumnEqConst(0, 1);
+        let pred2 = Predicate::ColumnEqConst(0, 1);
+        let pred3 = Predicate::ColumnEqConst(0, 2);
+
+        let mut set = HashSet::new();
+        set.insert(pred1);
+        set.insert(pred2);
+        set.insert(pred3);
+
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn test_predicate_debug() {
+        let pred = Predicate::ColumnEqConst(0, 42);
+        let debug_str = format!("{:?}", pred);
+        assert!(debug_str.contains("ColumnEqConst"));
+        assert!(debug_str.contains("42"));
+    }
+
+    // ========================================================================
+    // Integration / Complex Scenario Tests
+    // ========================================================================
+
+    #[test]
+    fn test_datalog_negation_pattern() {
+        // Pattern: unreachable(x) :- node(x), !reachable(x).
+        let nodes = IRNode::Scan {
+            relation: "node".to_string(),
+            schema: vec!["x".to_string()],
+        };
+
+        let reachable = IRNode::Scan {
+            relation: "reachable".to_string(),
+            schema: vec!["x".to_string()],
+        };
+
+        let unreachable = IRNode::Antijoin {
+            left: Box::new(nodes),
+            right: Box::new(reachable),
+            left_keys: vec![0],
+            right_keys: vec![0],
+            output_schema: vec!["x".to_string()],
+        };
+
+        assert_eq!(unreachable.output_schema(), vec!["x"]);
+        let output = unreachable.pretty_print(0);
+        assert!(output.contains("Antijoin"));
+    }
+
+    #[test]
+    fn test_datalog_aggregation_pattern() {
+        // Pattern: result(x, count<y>) :- data(x, y).
+        let data = IRNode::Scan {
+            relation: "data".to_string(),
+            schema: vec!["x".to_string(), "y".to_string()],
+        };
+
+        let result = IRNode::Aggregate {
+            input: Box::new(data),
+            group_by: vec![0],
+            aggregations: vec![(AggregateFunction::Count, 1)],
+            output_schema: vec!["x".to_string(), "count_y".to_string()],
+        };
+
+        assert_eq!(result.output_schema(), vec!["x", "count_y"]);
+    }
+
+    #[test]
+    fn test_join_then_aggregate() {
+        let orders = IRNode::Scan {
+            relation: "orders".to_string(),
+            schema: vec!["order_id".to_string(), "customer_id".to_string()],
+        };
+
+        let items = IRNode::Scan {
+            relation: "items".to_string(),
+            schema: vec!["item_order_id".to_string(), "price".to_string()],
+        };
+
+        let joined = IRNode::Join {
+            left: Box::new(orders),
+            right: Box::new(items),
+            left_keys: vec![0],
+            right_keys: vec![0],
+            output_schema: vec![
+                "order_id".to_string(),
+                "customer_id".to_string(),
+                "item_order_id".to_string(),
+                "price".to_string(),
+            ],
+        };
+
+        let aggregated = IRNode::Aggregate {
+            input: Box::new(joined),
+            group_by: vec![1],                               // group by customer_id
+            aggregations: vec![(AggregateFunction::Sum, 3)], // sum(price)
+            output_schema: vec!["customer_id".to_string(), "total_spent".to_string()],
+        };
+
+        assert_eq!(
+            aggregated.output_schema(),
+            vec!["customer_id", "total_spent"]
+        );
+    }
+
+    #[test]
+    fn test_pretty_print_indentation() {
+        let scan = IRNode::Scan {
+            relation: "data".to_string(),
+            schema: vec!["x".to_string()],
+        };
+
+        let output_0 = scan.pretty_print(0);
+        let output_2 = scan.pretty_print(2);
+
+        assert!(!output_0.starts_with("  "));
+        assert!(output_2.starts_with("    ")); // 2 * 2 spaces
     }
 }
