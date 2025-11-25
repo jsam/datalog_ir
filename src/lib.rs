@@ -32,45 +32,64 @@ pub enum AggregateFunction {
 pub enum IRNode {
     /// Scan a relation (read from EDB or IDB)
     Scan {
+        /// Name of the relation to scan
         relation: String,
-        schema: Vec<String>, // Variable names
+        /// Variable names (column names) in the schema
+        schema: Vec<String>,
     },
 
     /// Map (project/transform columns)
     Map {
+        /// Input node to project from
         input: Box<IRNode>,
-        projection: Vec<usize>, // Which input columns to keep
+        /// Indices of columns to keep from the input
+        projection: Vec<usize>,
+        /// Output column names after projection
         output_schema: Vec<String>,
     },
 
     /// Filter (select rows)
     Filter {
+        /// Input node to filter
         input: Box<IRNode>,
+        /// Predicate that rows must satisfy
         predicate: Predicate,
     },
 
     /// Join two inputs on shared keys
     ///
-    /// **Note**: Uses Vec<usize> for multi-column equi-joins
-    /// M06 needs to adapt from single usize to vec![usize]
+    /// **Note**: Uses `Vec<usize>` for multi-column equi-joins
+    /// M06 needs to adapt from single usize to `vec![usize]`
     Join {
+        /// Left input relation
         left: Box<IRNode>,
+        /// Right input relation
         right: Box<IRNode>,
-        left_keys: Vec<usize>,  // Columns from left (can be multiple!)
-        right_keys: Vec<usize>, // Columns from right
+        /// Column indices from left to join on (can be multiple)
+        left_keys: Vec<usize>,
+        /// Column indices from right to join on
+        right_keys: Vec<usize>,
+        /// Output column names after join
         output_schema: Vec<String>,
     },
 
     /// Distinct (remove duplicates)
-    Distinct { input: Box<IRNode> },
+    Distinct {
+        /// Input node to deduplicate
+        input: Box<IRNode>,
+    },
 
     /// Union (combine multiple inputs)
-    Union { inputs: Vec<IRNode> },
+    Union {
+        /// Input nodes to combine (must have same schema)
+        inputs: Vec<IRNode>,
+    },
 
     /// Aggregate operation (GROUP BY with aggregation functions)
     ///
     /// Example: `result(x, count<y>) :- data(x, y).` groups by x and counts y values
     Aggregate {
+        /// Input node to aggregate
         input: Box<IRNode>,
         /// Columns to group by (indices into input schema)
         group_by: Vec<usize>,
