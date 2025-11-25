@@ -11,7 +11,7 @@ documentation = "https://docs.rs/datalog_ir"
 readme = "README.md"
 keywords = ["datalog", "query", "ir", "database", "optimizer"]
 categories = ["data-structures", "database"]
-rust-version = "1.70"
+rust-version = "1.74"
 
 [dependencies]
 
