@@ -33,13 +33,13 @@ pub enum IRNode {
     /// Scan a relation (read from EDB or IDB)
     Scan {
         relation: String,
-        schema: Vec<String>,  // Variable names
+        schema: Vec<String>, // Variable names
     },
 
     /// Map (project/transform columns)
     Map {
         input: Box<IRNode>,
-        projection: Vec<usize>,  // Which input columns to keep
+        projection: Vec<usize>, // Which input columns to keep
         output_schema: Vec<String>,
     },
 
@@ -56,20 +56,16 @@ pub enum IRNode {
     Join {
         left: Box<IRNode>,
         right: Box<IRNode>,
-        left_keys: Vec<usize>,   // Columns from left (can be multiple!)
-        right_keys: Vec<usize>,  // Columns from right
+        left_keys: Vec<usize>,  // Columns from left (can be multiple!)
+        right_keys: Vec<usize>, // Columns from right
         output_schema: Vec<String>,
     },
 
     /// Distinct (remove duplicates)
-    Distinct {
-        input: Box<IRNode>,
-    },
+    Distinct { input: Box<IRNode> },
 
     /// Union (combine multiple inputs)
-    Union {
-        inputs: Vec<IRNode>,
-    },
+    Union { inputs: Vec<IRNode> },
 
     /// Aggregate operation (GROUP BY with aggregation functions)
     ///
@@ -124,7 +120,7 @@ impl IRNode {
         match self {
             IRNode::Scan { schema, .. } => schema.clone(),
             IRNode::Map { output_schema, .. } => output_schema.clone(),
-            IRNode::Filter { input, .. } => input.output_schema(),  // Pass through!
+            IRNode::Filter { input, .. } => input.output_schema(), // Pass through!
             IRNode::Join { output_schema, .. } => output_schema.clone(),
             IRNode::Distinct { input } => input.output_schema(),
             IRNode::Union { inputs } => {
@@ -148,7 +144,11 @@ impl IRNode {
             IRNode::Scan { relation, schema } => {
                 format!("{}Scan({}) schema={:?}", prefix, relation, schema)
             }
-            IRNode::Map { input, projection, output_schema } => {
+            IRNode::Map {
+                input,
+                projection,
+                output_schema,
+            } => {
                 format!(
                     "{}Map(projection={:?}, output={:?})\n{}",
                     prefix,
@@ -357,9 +357,8 @@ impl Predicate {
     /// **For M06 filter pushdown**: Use this when pushing filters through maps
     pub fn adjust_for_projection(&self, projection: &[usize]) -> Option<Self> {
         // Helper: find new index of old column
-        let find_new_index = |old_idx: usize| -> Option<usize> {
-            projection.iter().position(|&idx| idx == old_idx)
-        };
+        let find_new_index =
+            |old_idx: usize| -> Option<usize> { projection.iter().position(|&idx| idx == old_idx) };
 
         match self {
             Predicate::ColumnEqConst(col, val) => {
@@ -637,12 +636,20 @@ mod tests {
     fn test_join_multi_key() {
         let left = IRNode::Scan {
             relation: "orders".to_string(),
-            schema: vec!["order_id".to_string(), "customer_id".to_string(), "product_id".to_string()],
+            schema: vec![
+                "order_id".to_string(),
+                "customer_id".to_string(),
+                "product_id".to_string(),
+            ],
         };
 
         let right = IRNode::Scan {
             relation: "order_details".to_string(),
-            schema: vec!["detail_order_id".to_string(), "detail_product_id".to_string(), "quantity".to_string()],
+            schema: vec![
+                "detail_order_id".to_string(),
+                "detail_product_id".to_string(),
+                "quantity".to_string(),
+            ],
         };
 
         let join = IRNode::Join {
@@ -754,9 +761,7 @@ mod tests {
             relation: "data".to_string(),
             schema: vec!["x".to_string()],
         };
-        let union = IRNode::Union {
-            inputs: vec![scan],
-        };
+        let union = IRNode::Union { inputs: vec![scan] };
         assert_eq!(union.output_schema(), vec!["x"]);
     }
 
@@ -785,16 +790,17 @@ mod tests {
     fn test_aggregate_output_schema() {
         let scan = IRNode::Scan {
             relation: "sales".to_string(),
-            schema: vec!["product".to_string(), "region".to_string(), "amount".to_string()],
+            schema: vec![
+                "product".to_string(),
+                "region".to_string(),
+                "amount".to_string(),
+            ],
         };
 
         let aggregate = IRNode::Aggregate {
             input: Box::new(scan),
             group_by: vec![0, 1],
-            aggregations: vec![
-                (AggregateFunction::Sum, 2),
-                (AggregateFunction::Count, 2),
-            ],
+            aggregations: vec![(AggregateFunction::Sum, 2), (AggregateFunction::Count, 2)],
             output_schema: vec![
                 "product".to_string(),
                 "region".to_string(),
@@ -885,7 +891,12 @@ mod tests {
                 (AggregateFunction::Max, 1),
                 (AggregateFunction::Min, 1),
             ],
-            output_schema: vec!["x".to_string(), "cnt".to_string(), "max".to_string(), "min".to_string()],
+            output_schema: vec![
+                "x".to_string(),
+                "cnt".to_string(),
+                "max".to_string(),
+                "min".to_string(),
+            ],
         };
         let output = aggregate.pretty_print(0);
         assert!(output.contains("Count(1)"));
@@ -1368,12 +1379,30 @@ mod tests {
         let projection = vec![1, 0];
 
         let predicates = vec![
-            (Predicate::ColumnEqConst(0, 1), Predicate::ColumnEqConst(1, 1)),
-            (Predicate::ColumnNeConst(0, 1), Predicate::ColumnNeConst(1, 1)),
-            (Predicate::ColumnGtConst(0, 1), Predicate::ColumnGtConst(1, 1)),
-            (Predicate::ColumnLtConst(0, 1), Predicate::ColumnLtConst(1, 1)),
-            (Predicate::ColumnGeConst(0, 1), Predicate::ColumnGeConst(1, 1)),
-            (Predicate::ColumnLeConst(0, 1), Predicate::ColumnLeConst(1, 1)),
+            (
+                Predicate::ColumnEqConst(0, 1),
+                Predicate::ColumnEqConst(1, 1),
+            ),
+            (
+                Predicate::ColumnNeConst(0, 1),
+                Predicate::ColumnNeConst(1, 1),
+            ),
+            (
+                Predicate::ColumnGtConst(0, 1),
+                Predicate::ColumnGtConst(1, 1),
+            ),
+            (
+                Predicate::ColumnLtConst(0, 1),
+                Predicate::ColumnLtConst(1, 1),
+            ),
+            (
+                Predicate::ColumnGeConst(0, 1),
+                Predicate::ColumnGeConst(1, 1),
+            ),
+            (
+                Predicate::ColumnLeConst(0, 1),
+                Predicate::ColumnLeConst(1, 1),
+            ),
         ];
 
         for (input, expected) in predicates {
@@ -1491,12 +1520,15 @@ mod tests {
 
         let aggregated = IRNode::Aggregate {
             input: Box::new(joined),
-            group_by: vec![1], // group by customer_id
+            group_by: vec![1],                               // group by customer_id
             aggregations: vec![(AggregateFunction::Sum, 3)], // sum(price)
             output_schema: vec!["customer_id".to_string(), "total_spent".to_string()],
         };
 
-        assert_eq!(aggregated.output_schema(), vec!["customer_id", "total_spent"]);
+        assert_eq!(
+            aggregated.output_schema(),
+            vec!["customer_id", "total_spent"]
+        );
     }
 
     #[test]
