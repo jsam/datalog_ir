@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
+  RUST_BACKTRACE: 1
 
 jobs:
   test:
@@ -34,8 +34,8 @@ jobs:
       - name: Run tests
         run: cargo test --all-features
 
-      - name: Run doc tests
-        run: cargo test --doc
+      - name: Run tests (release)
+        run: cargo test --all-features --release
 
   fmt:
     name: Format
@@ -73,7 +73,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Run clippy
+      - name: Run Clippy
         run: cargo clippy --all-features -- -D warnings
 
   docs:
@@ -97,18 +97,20 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Check documentation
-        env:
-          RUSTDOCFLAGS: -Dwarnings
         run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   msrv:
-    name: MSRV (1.74)
+    name: Minimum Supported Rust Version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.74
-        uses: dtolnay/rust-toolchain@1.74
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.74"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
